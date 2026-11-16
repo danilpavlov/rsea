@@ -1,0 +1,430 @@
+<style>
+  #rsea-studies { display: grid; gap: 14px; }
+  #rsea-studies .sea-study { min-width: 0; }
+  #rsea-studies .sea-terminal {
+    --sea-paper: light-dark(#f7f7f3, #0b1319);
+    --sea-ink: light-dark(#374b54, #b0c5ce);
+    --sea-faint: light-dark(#8d9ba0, #3d5662);
+    --sea-texture: light-dark(#637a85, #63828f);
+    --sea-foam: light-dark(#223c48, #d8e4e4);
+    background: var(--sea-paper);
+    color: var(--sea-ink);
+    padding: 18px 12px;
+    min-width: 0;
+  }
+  #rsea-studies .sea-terminal pre {
+    display: block;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 17px;
+    letter-spacing: 0;
+    white-space: pre;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    overflow: hidden;
+    height: 544px;
+  }
+  #rsea-studies .sea-tone-0 { color: var(--sea-faint); }
+  #rsea-studies .sea-tone-1 { color: var(--sea-texture); }
+  #rsea-studies .sea-tone-3 { color: var(--sea-foam); }
+  #rsea-studies .sea-tone-4 { color: light-dark(#bac6c7, #263f4d); }
+  #rsea-studies .sea-tone-5 { color: light-dark(#9bacb2, #385665); }
+  #rsea-studies .sea-tone-6 { color: light-dark(#7c929d, #507282); }
+  #rsea-studies .sea-tone-7 { color: light-dark(#617d8a, #7193a1); }
+  #rsea-studies .sea-tone-8 { color: light-dark(#466673, #94b2bc); }
+  #rsea-studies .sea-tone-9 { color: light-dark(#304f5e, #b5ccd0); }
+  #rsea-studies .sea-tone-10 { color: light-dark(#203e4d, #d4e1df); }
+  #rsea-studies .sea-tone-11 { color: light-dark(#17323f, #ecede4); }
+</style>
+<div id="rsea-studies" aria-label="ASCII sea motion">
+  <div class="viz-controls">
+    <button type="button" class="btn" id="rsea-motion">Pause motion</button>
+    <label class="form-label" for="rsea-detail">Detail
+      <select class="form-select" id="rsea-detail">
+        <option value="1">Balanced</option>
+        <option value="2" selected>Detailed</option>
+        <option value="3">Rich</option>
+      </select>
+    </label>
+    <label class="form-label" for="rsea-viewpoint">Open-water viewpoint
+      <select class="form-select" id="rsea-viewpoint">
+        <option value="low" selected>Close to the water</option>
+        <option value="raised">Higher up</option>
+      </select>
+    </label>
+    <span class="text-small text-muted" id="rsea-motion-state" aria-live="polite">ASCII motion studies</span>
+  </div>
+  <div class="viz-carousel" aria-label="ASCII sea directions">
+    <section class="sea-study" data-variant="Open water" aria-label="Open water seen in three-dimensional perspective">
+      <div class="sea-terminal"><pre id="rsea-open" role="img" aria-label="A low perspective view of a three-dimensional sea, with shaded wave slopes, overlapping crests, and foam moving toward the viewer"></pre></div>
+    </section>
+    <section class="sea-study" data-variant="Rolling swells" aria-label="Rolling swells, with broad contours moving sideways" hidden>
+      <div class="sea-terminal"><pre id="rsea-swells" role="img" aria-label="Four broad swells with contoured faces, small ripples, and foam along their crests"></pre></div>
+    </section>
+    <section class="sea-study" data-variant="Shore wash" aria-label="Shore wash, with waves meeting a curved beach" hidden>
+      <div class="sea-terminal"><pre id="rsea-shore" role="img" aria-label="An oblique view of textured water, incoming foam, wet sand, and small rocks along a curved beach"></pre></div>
+    </section>
+  </div>
+</div>
+<script>
+(() => {
+  const root = document.getElementById('rsea-studies');
+  const screens = ['rsea-open', 'rsea-swells', 'rsea-shore'].map(id => document.getElementById(id));
+  const toggle = document.getElementById('rsea-motion');
+  const detail = document.getElementById('rsea-detail');
+  const viewpoint = document.getElementById('rsea-viewpoint');
+  const status = document.getElementById('rsea-motion-state');
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const state = { playing: !reducedMotion, speed: 1, detail: 2, viewpoint: 'low' };
+  const saved = window.openai?.widgetState?.privateContent;
+  if (saved && typeof saved.playing === 'boolean') state.playing = saved.playing;
+  if (saved && Number.isFinite(saved.speed)) state.speed = Math.max(0.25, Math.min(1.5, saved.speed));
+  if (saved && [1, 2, 3].includes(saved.detail)) state.detail = saved.detail;
+  if (saved && ['low', 'raised'].includes(saved.viewpoint)) state.viewpoint = saved.viewpoint;
+  let columns = 80;
+  let cellAspect = 7.8 / 17;
+  const rows = 32;
+  let time = 5;
+  let previous = 0;
+  let drawn = 0;
+  const tau = Math.PI * 2;
+  const fract = n => n - Math.floor(n);
+  const blank = () => Array.from({ length: rows }, () => Array.from({ length: columns }, () => ({ glyph: ' ', tone: 0 })));
+  const put = (grid, x, y, glyph, tone = 2) => {
+    if (x >= 0 && x < columns && y >= 0 && y < rows) grid[y][x] = { glyph, tone };
+  };
+  const curveGlyph = (height, next) => {
+    if (Math.floor(next) > Math.floor(height)) return '\\';
+    if (Math.floor(next) < Math.floor(height)) return '/';
+    const fraction = fract(height);
+    return fraction < 0.20 ? "'" : fraction < 0.48 ? '-' : fraction < 0.76 ? '_' : '.';
+  };
+
+  function texture(grid, t, horizon = -1) {
+    for (let y = horizon + 1; y < rows; y++) {
+      const depth = (y - horizon) / (rows - horizon);
+      for (let x = 0; x < columns; x++) {
+        const u = x / columns;
+        const along = u * (93 - depth * 35) + t * 0.20;
+        const band = depth ** 0.7 * 92 - t * 0.65 + Math.sin(u * 19) * 0.6;
+        const fine = Math.sin(along + band) + 0.5 * Math.sin(along * 1.83 - band * 0.47);
+        const cross = Math.sin(band * 0.61 + u * 11 + t * 0.11);
+        const threshold = 1.22 - state.detail * 0.16;
+        if (fine > threshold && cross > -0.5) {
+          put(grid, x, y, fine > 1.31 ? '-' : cross > 0.65 ? ',' : '.', depth < 0.3 ? 0 : 1);
+        } else if (state.detail >= 2 && cross > 0.92 && fine > -0.12) {
+          put(grid, x, y, fine > 0.6 ? '_' : '.', 0);
+        }
+      }
+    }
+  }
+
+  function openWater(t) {
+    const grid = blank();
+    const horizon = 5.5;
+    const eyeHeight = state.viewpoint === 'low' ? 2.3 : 4.8;
+    const focalY = rows * 0.9;
+    const focalX = focalY / cellAspect;
+    const sin = Math.sin, cos = Math.cos;
+    const far = 160;
+    // Amplitude, x/z wave numbers, speed, phase: all in world space.
+    const waves = [
+      [0.40, 0.58, 1.48, 0.64, 0.10],
+      [0.23, -0.90, 0.85, 0.40, 2.0],
+      [0.12, 1.70, 2.60, 1.02, 4.2],
+      [0.045, -3.4, 4.5, 1.50, 0.90],
+    ].map(([a, kx, kz, speed, phase]) => [a, kx, kz, speed * t + phase, (kx * kx + kz * kz) * 1.2 / (focalX * focalX)]);
+    const count = state.detail === 1 ? 3 : 4;
+    const bound = 0.80;
+
+    function heightAt(x, z) {
+      let height = 0;
+      const z2 = z * z;
+      for (let i = 0; i < count; i++) {
+        const wave = waves[i];
+        height += wave[0] / (1 + wave[4] * z2) * sin(wave[1] * x + wave[2] * z + wave[3]);
+      }
+      return height;
+    }
+
+    function surface(x, z) {
+      let height = 0, slopeX = 0, slopeZ = 0, curvature = 0;
+      for (let i = 0; i < count; i++) {
+        const [a, kx, kz, phase, coefficient] = waves[i];
+        const k2 = kx * kx + kz * kz;
+        const denominator = 1 + coefficient * z * z;
+        const amplitude = a / denominator;
+        const amplitudeDerivative = -2 * a * coefficient * z / (denominator * denominator);
+        const angle = kx * x + kz * z + phase;
+        const sine = sin(angle), cosine = cos(angle);
+        height += amplitude * sine;
+        slopeX += amplitude * kx * cosine;
+        slopeZ += amplitude * kz * cosine + amplitudeDerivative * sine;
+        curvature += amplitude * k2 * sine;
+      }
+      return { height, slopeX, slopeZ, curvature };
+    }
+
+    for (let y = Math.floor(horizon); y < rows; y++) {
+      const down = (y + 0.5 - horizon) / focalY;
+      if (down <= 0) continue;
+      for (let x = 0; x < columns; x++) {
+        const across = (x + 0.5 - columns / 2) / focalX;
+        let nearZ = Math.max(0.04, (eyeHeight - bound) / down);
+        const endZ = Math.min(far, (eyeHeight + bound) / down);
+        let hitZ = -1;
+        // March from the camera. The first crossing hides every wave behind it.
+        while (nearZ < endZ) {
+          const nextZ = Math.min(endZ, nearZ + Math.min(0.50, 0.075 + nearZ * 0.014));
+          const clearance = eyeHeight - down * nextZ - heightAt(across * nextZ, nextZ);
+          if (clearance <= 0) {
+            let low = nearZ, high = nextZ;
+            for (let step = 0; step < 7; step++) {
+              const middle = (low + high) * 0.5;
+              if (eyeHeight - down * middle > heightAt(across * middle, middle)) low = middle;
+              else high = middle;
+            }
+            hitZ = (low + high) * 0.5;
+            break;
+          }
+          nearZ = nextZ;
+        }
+        if (hitZ < 0) {
+          put(grid, x, y, x % 3 ? '.' : '-', 0);
+          continue;
+        }
+        const worldX = across * hitZ;
+        const sample = surface(worldX, hitZ);
+        let sx = sample.slopeX, sz = sample.slopeZ;
+        // Smaller ripples perturb reflected light without changing the large swells.
+        if (state.detail >= 2) {
+          const strength = (state.detail === 3 ? 0.19 : 0.11) * Math.exp(-hitZ / 30);
+          sx += strength * Math.sin(worldX * 7.1 + hitZ * 4.7 + t * 1.1);
+          sz += strength * Math.cos(worldX * 3.4 - hitZ * 8.3 - t * 1.3);
+        }
+        const normalLength = Math.hypot(sx, 1, sz);
+        const nx = -sx / normalLength, ny = 1 / normalLength, nz = -sz / normalLength;
+        const viewLength = Math.hypot(across, down, 1);
+        const vx = -across / viewLength, vy = down / viewLength, vz = -1 / viewLength;
+        const lx = -0.71, ly = 0.68, lz = 0.18;
+        const diffuse = Math.max(0, nx * lx + ny * ly + nz * lz);
+        const halfLength = Math.hypot(lx + vx, ly + vy, lz + vz);
+        const glint = Math.pow(Math.max(0, (nx * (lx + vx) + ny * (ly + vy) + nz * (lz + vz)) / halfLength), 36);
+        const facing = Math.max(0, nx * vx + ny * vy + nz * vz);
+        const fog = Math.exp(-hitZ / 55);
+        const light = 0.06 + diffuse * 0.65 + glint * 0.12 + Math.pow(1 - facing, 3) * 0.06;
+        const shade = Math.max(0, Math.min(1, ((light - 0.22) / 0.55) * fog + 0.16 * (1 - fog)));
+        const ramp = '  .,:;~-=+*#';
+        let glyph = ramp[Math.min(ramp.length - 1, Math.floor(shade * ramp.length))];
+        let tone = 4 + Math.min(7, Math.floor(shade * 8));
+        // Ripples are attached to the 3D surface, so they stretch toward the
+        // camera and disappear behind crests along with the faces beneath them.
+        const rill = 0.5 + 0.5 * sin(worldX * 4.6 + hitZ * 9.0 + t * 1.8
+          + 0.6 * sin(worldX * 2.3 - hitZ));
+        if (hitZ < 30 && shade < 0.75 && rill < 0.18) glyph = ' ';
+        else if (hitZ < 30 && shade < 0.75 && rill < 0.43) {
+          glyph = '.';
+          tone = Math.max(4, tone - 1);
+        }
+        const lace = Math.sin(worldX * 4.9 + hitZ * 3.1 + t * 0.65)
+          + 0.5 * Math.sin(worldX * 8.2 - hitZ * 1.7 - t * 0.3);
+        if (hitZ < 30 && sample.height > 0.26 && sample.curvature > 0.45 && lace > 0.45) {
+          glyph = lace > 1.1 ? '=' : '~';
+          tone = hitZ < 15 ? 10 : 8;
+        }
+        put(grid, x, y, glyph, tone);
+      }
+    }
+    return grid;
+  }
+
+  function swells(t) {
+    const grid = blank();
+    texture(grid, t * 0.65);
+    for (let layer = 0; layer < 4; layer++) {
+      const base = 3.5 + layer * 7.7;
+      const amplitude = 1.1 + layer * 0.48;
+      const wavelength = 29 + layer * 12;
+      const drift = t * (1.05 + layer * 0.45);
+      const profile = x => base
+        + amplitude * Math.sin((x + drift + layer * 9) / wavelength * tau)
+        + 0.22 * Math.sin((x - drift * 0.3) / (wavelength * 1.65) * tau);
+      for (let x = 0; x < columns; x++) {
+        const height = profile(x);
+        const y = Math.floor(height);
+        const slope = profile(x + 0.5) - profile(x - 0.5);
+        const fraction = fract(height);
+        const glyph = curveGlyph(height, profile(x + 1));
+        const crest = height < base - amplitude * 0.40;
+        put(grid, x, y, glyph, crest ? 3 : 2);
+        const flecks = Math.sin((x + drift) * 0.31 + layer * 4.1);
+        if (crest && flecks > -0.4 && state.detail >= 2) {
+          put(grid, x, y + 1, flecks > 0.78 ? ':' : '.', 2);
+          if (state.detail === 3 && flecks > 0.2) put(grid, x, y + 2, ',', 1);
+        }
+        if (state.detail >= 2) {
+          const face = height + 2.0 + 0.35 * Math.sin((x + drift) * 0.16);
+          if (flecks > -0.1) put(grid, x, Math.floor(face), fraction < 0.55 ? '-' : '_', 1);
+          if (flecks < -0.45) put(grid, x, y + 4, slope > 0 ? ',' : '.', 0);
+        }
+        if (state.detail === 3 && flecks > 0.35 && Math.abs(slope) > 0.16) {
+          put(grid, x, y + 3, slope > 0 ? '\\' : '/', 0);
+        }
+      }
+    }
+    return grid;
+  }
+
+  function shore(t) {
+    const grid = blank();
+    for (let y = 0; y < rows; y++) {
+      const v = y / (rows - 1);
+      const coast = columns * (0.94 - 0.42 * Math.pow(v, 1.35));
+      const wash = columns * 0.027 * Math.sin(t * 0.47 + v * 2.0);
+      const edge = coast + wash;
+      for (let x = 0; x < columns; x++) {
+        const distance = (coast - x) / columns;
+        const nearEdge = x - edge;
+        if (nearEdge > 1.5) {
+          // Static sand marks stay fixed while the foam advances and retreats.
+          const hash = ((x * 1777 + y * 7919) ^ (x * y * 31)) >>> 0;
+          if (hash % (state.detail === 3 ? 13 : 23) === 0) put(grid, x, y, hash % 3 ? '.' : ',', 0);
+          if (state.detail >= 2 && x < coast + columns * 0.04 && hash % 4 === 0) put(grid, x, y, ':', 0);
+          continue;
+        }
+        if (Math.abs(nearEdge) < 0.85) {
+          put(grid, x, y, (y + Math.floor(t * 0.6)) % 4 === 0 ? ':' : '.', 3);
+          continue;
+        }
+        if (nearEdge > -3.0) {
+          const foam = Math.sin(y * 0.7 + t * 0.25) + Math.sin(x * 0.9 - t * 0.20) * 0.5;
+          if (foam > 0.05) put(grid, x, y, foam > 0.9 ? 'o' : foam > 0.45 ? ':' : '.', 2);
+          continue;
+        }
+        const phase = (distance + t * 0.025) / 0.16 * tau + 0.24 * Math.sin(v * 8 - t * 0.12);
+        const crest = Math.cos(phase);
+        const breaks = Math.sin(y * 0.63 + distance * 8 + t * 0.1);
+        const lace = Math.sin(y * 0.8 - t * 0.2) + Math.sin(x * 0.47 + t * 0.13) * 0.5;
+        if (crest > 0.93 && breaks > -0.55) put(grid, x, y, '~', 3);
+        else if (crest > 0.84 && breaks > 0.1) put(grid, x, y, '-', 2);
+        else if (crest > 0.68 && breaks > 0.7) put(grid, x, y, '.', 2);
+        else if (state.detail >= 2 && crest > 0.4 && lace > 0.2) put(grid, x, y, lace > 0.9 ? ':' : '.', 1);
+        else {
+          const ripple = Math.sin(x * 0.44 + y * 0.65 + t * 0.35)
+            + 0.45 * Math.sin(x * 0.77 - y * 0.39 + t * 0.18);
+          if (ripple > 1.32 - state.detail * 0.13 && crest < 0.5) put(grid, x, y, ripple > 1.3 ? '-' : '.', 0);
+        }
+      }
+    }
+    if (state.detail >= 2) {
+      // Fixed clusters of low rocks anchor the beach while water continues moving.
+      for (const [cx, cy, rx, ry] of [[0.84, 0.78, 0.045, 1.6], [0.94, 0.89, 0.028, 1.1], [0.91, 0.48, 0.025, 1.0]]) {
+        for (let y = 0; y < rows; y++) {
+          for (let x = 0; x < columns; x++) {
+            const dx = (x - columns * cx) / Math.max(1.4, columns * rx);
+            const dy = (y - rows * cy) / ry;
+            const distance = dx * dx + dy * dy;
+            if (distance > 1) continue;
+            const edge = distance > 0.53;
+            put(grid, x, y, edge ? dy < -0.35 ? '_' : dx < 0 ? '/' : '\\' : (x + y) % 3 ? ':' : '.', edge ? 2 : 1);
+          }
+        }
+      }
+    }
+    return grid;
+  }
+
+  function markup(grid) {
+    return grid.map(row => {
+      let output = '';
+      let tone = -1;
+      for (const cell of row) {
+        if (cell.tone !== tone) {
+          if (tone !== -1) output += '</span>';
+          tone = cell.tone;
+          output += `<span class="sea-tone-${tone}">`;
+        }
+        output += cell.glyph === '&' ? '&amp;' : cell.glyph === '<' ? '&lt;' : cell.glyph === '>' ? '&gt;' : cell.glyph;
+      }
+      return output + '</span>';
+    }).join('\n');
+  }
+
+  function render() {
+    [openWater, swells, shore].forEach((draw, index) => {
+      screens[index].innerHTML = markup(draw(time));
+    });
+    toggle.textContent = state.playing ? 'Pause motion' : 'Play motion';
+    toggle.setAttribute('aria-pressed', String(!state.playing));
+    status.textContent = state.playing ? 'ASCII motion studies' : 'Paused';
+    detail.value = String(state.detail);
+    viewpoint.value = state.viewpoint;
+  }
+
+  function fit() {
+    const terminalWidth = root.getBoundingClientRect().width - 24;
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (context) context.font = getComputedStyle(screens[0]).font;
+    const cellWidth = context ? context.measureText('M').width : 8;
+    cellAspect = cellWidth / 17;
+    columns = Math.max(20, Math.min(120, Math.floor(terminalWidth / Math.max(5, cellWidth))));
+    render();
+  }
+
+  function remember() {
+    window.openai?.setWidgetState?.({
+      modelContent: { asciiOnly: true, sun: false, preferredVariant: 'Open water', playing: state.playing, speed: state.speed, detail: state.detail, viewpoint: state.viewpoint },
+      privateContent: { playing: state.playing, speed: state.speed, detail: state.detail, viewpoint: state.viewpoint }
+    }).catch(() => {});
+  }
+
+  toggle.addEventListener('click', () => {
+    state.playing = !state.playing;
+    render();
+    remember();
+  });
+  detail.addEventListener('change', () => {
+    state.detail = Number(detail.value);
+    render();
+    remember();
+  });
+  viewpoint.addEventListener('change', () => {
+    state.viewpoint = viewpoint.value;
+    render();
+    remember();
+  });
+  window.addEventListener('openai:set_globals', event => {
+    const incoming = event.detail?.globals?.widgetState?.privateContent;
+    if (!incoming) return;
+    if (typeof incoming.playing === 'boolean') state.playing = incoming.playing;
+    if (Number.isFinite(incoming.speed)) state.speed = Math.max(0.25, Math.min(1.5, incoming.speed));
+    if ([1, 2, 3].includes(incoming.detail)) state.detail = incoming.detail;
+    if (['low', 'raised'].includes(incoming.viewpoint)) state.viewpoint = incoming.viewpoint;
+    render();
+  });
+  fit();
+  new ResizeObserver(fit).observe(root);
+
+  if (globalThis.Tweak) {
+    const tweak = new Tweak({ container: root, onChange: () => { render(); remember(); } });
+    tweak.addSlider(state, 'speed', { label: 'Motion speed', min: 0.25, max: 1.5, step: 0.25, unit: 'x' });
+  }
+
+  function animate(now) {
+    if (!root.isConnected) return;
+    const elapsed = previous ? Math.min((now - previous) / 1000, 0.1) : 0;
+    previous = now;
+    if (state.playing && !document.hidden) {
+      time += elapsed * state.speed;
+      if (now - drawn > 80) { render(); drawn = now; }
+    }
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+})();
+</script>
