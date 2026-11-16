@@ -1,0 +1,19 @@
+[package]
+name = "rsea"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A quiet, animated sea for your terminal"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["terminal", "ascii", "animation", "sea", "cli"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+ctrlc = { version = "3.5", features = ["termination"] }
+
+[profile.release]
+lto = "thin"
+strip = true
